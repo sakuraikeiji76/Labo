@@ -1266,7 +1266,8 @@ class CalendarApp:
     def _draw_day_complete_marker(self, day: int):
         if day not in self._day_positions: return
         week, dow, col_x, row_y = self._day_positions[day]
-        x1 = col_x; y1 = row_y; x2 = col_x + self.CELL_W; y2 = row_y + self.CELL_H
+        x1 = col_x; y1 = row_y
+        x2 = col_x + self.BLOCK_W * self.CELL_W; y2 = row_y + self.BLOCK_H * self.CELL_H
         rect_id = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#fffacd", outline="", tags="day_complete")
         self.day_complete_rects[day] = rect_id
         self.canvas.tag_lower("day_complete")
@@ -1657,11 +1658,7 @@ class CalendarApp:
         self._hide_hp_tooltip()
 
     def _show_hp_tooltip(self, event, text: str):
-        if self._hp_tooltip_win is not None:
-            try:
-                self._hp_tooltip_win.geometry(f"+{event.x_root+12}+{event.y_root+12}"); return
-            except Exception:
-                self._hp_tooltip_win = None
+        self._hide_hp_tooltip()
         win = tk.Toplevel(self.root)
         win.wm_overrideredirect(True); win.wm_attributes("-topmost", True)
         win.geometry(f"+{event.x_root+12}+{event.y_root+12}")
@@ -2068,7 +2065,8 @@ class CalendarApp:
 
     def _toggle_selection(self, cell_key):
         if cell_key not in self.cell_data:
-            if self.selected_value is not None: self._clear_selection(); return
+            if self.selected_value is not None: self._clear_selection()
+            return
         _, li, _ = cell_key
         if li == 0 or li == 9 or li == 10: return
         clicked_value = self.cell_data[cell_key]
@@ -2344,7 +2342,6 @@ class CalendarApp:
         self._finish_edit(); self._start_edit(ck)
 
     def _start_edit(self, cell_key):
-        self._save_state()
         bounds = self._cell_bounds.get(cell_key)
         if bounds is None: return
         x1,y1,x2,y2 = bounds
@@ -2376,6 +2373,7 @@ class CalendarApp:
         if ck is None: return
         old_val = self.cell_data.get(ck, "")
         if new_val == old_val: return
+        self._save_state()
         rid = self._rect_ids.get(ck); tid = self._text_ids.get(ck)
         if not new_val:
             self.cell_data.pop(ck, None); self.cell_colors.pop(ck, None)
