@@ -1,4 +1,31 @@
-import { dtw } from './dtw.js';
+// ── DTW (inlined – no ES module import needed) ───────────────────────────────
+function frameDist(a, b) {
+  let d = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const dx = a[i].x - b[i].x;
+    const dy = a[i].y - b[i].y;
+    const dz = (a[i].z ?? 0) - (b[i].z ?? 0);
+    d += dx * dx + dy * dy + dz * dz;
+  }
+  return d;
+}
+
+function dtw(seq1, seq2) {
+  const n = seq1.length, m = seq2.length;
+  if (n === 0 || m === 0) return Infinity;
+  const dp = new Float64Array(n * m).fill(Infinity);
+  dp[0] = frameDist(seq1[0], seq2[0]);
+  for (let i = 1; i < n; i++) dp[i * m]     = dp[(i-1) * m]     + frameDist(seq1[i], seq2[0]);
+  for (let j = 1; j < m; j++) dp[j]         = dp[j-1]           + frameDist(seq1[0], seq2[j]);
+  for (let i = 1; i < n; i++) {
+    for (let j = 1; j < m; j++) {
+      dp[i*m+j] = frameDist(seq1[i], seq2[j]) +
+        Math.min(dp[(i-1)*m+j], dp[i*m+(j-1)], dp[(i-1)*m+(j-1)]);
+    }
+  }
+  return dp[n*m-1] / (n + m);
+}
 
 // ── Landmark indices ──────────────────────────────────────────────────────────
 const OUTER_INDICES = [0,267,269,270,409,291,375,321,405,314,17,84,181,91,146,61,185,40,39,37];
