@@ -19,36 +19,71 @@
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas"></canvas>
         <div id="fps-overlay" class="fps-overlay">0 FPS</div>
+        <!-- 認識モード進捗バー -->
+        <div id="recog-progress" class="recog-progress hidden">
+          <div id="recog-progress-bar" class="recog-progress-bar"></div>
+          <span id="recog-progress-label" class="recog-progress-label">収集中…</span>
+        </div>
       </div>
     </section>
 
-    <!-- 右：口形ビューワー＋計測値 -->
+    <!-- 右：タブパネル -->
     <aside class="info-panel">
-      <div class="mouth-viewer-wrapper">
-        <h2>口の形ビューワー</h2>
-        <canvas id="mouth-canvas" width="260" height="200"></canvas>
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="measure">計測</button>
+        <button class="tab-btn" data-tab="templates">テンプレート</button>
+        <button class="tab-btn" data-tab="results">認識結果</button>
       </div>
 
-      <div class="metrics">
-        <h2>計測値</h2>
-        <table>
-          <tr>
-            <th>開口度</th>
-            <td id="m-openness">—</td>
-          </tr>
-          <tr>
-            <th>口幅</th>
-            <td id="m-width">—</td>
-          </tr>
-          <tr>
-            <th>縦横比</th>
-            <td id="m-ratio">—</td>
-          </tr>
-          <tr>
-            <th>FPS</th>
-            <td id="m-fps">—</td>
-          </tr>
-        </table>
+      <!-- ── 計測タブ ── -->
+      <div class="tab-content active" id="tab-measure">
+        <div class="mouth-viewer-wrapper">
+          <h2>口の形ビューワー</h2>
+          <canvas id="mouth-canvas" width="260" height="200"></canvas>
+        </div>
+        <div class="metrics">
+          <h2>計測値</h2>
+          <table>
+            <tr><th>開口度</th><td id="m-openness">—</td></tr>
+            <tr><th>口幅</th>  <td id="m-width">—</td></tr>
+            <tr><th>縦横比</th><td id="m-ratio">—</td></tr>
+            <tr><th>FPS</th>   <td id="m-fps">—</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── テンプレートタブ ── -->
+      <div class="tab-content" id="tab-templates">
+        <div id="drop-zone" class="drop-zone" role="button" tabindex="0"
+             aria-label="JSONファイルをドロップまたはクリックして読み込み">
+          <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 16V4m0 0L8 8m4-4l4 4"/>
+            <path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>
+          </svg>
+          <span class="drop-primary">JSONをドロップ</span>
+          <span class="drop-secondary">またはクリックして選択</span>
+          <input type="file" id="file-input" multiple accept=".json" />
+        </div>
+        <div id="template-list" class="template-list">
+          <p class="empty-hint">JSONファイルをドロップして読み込んでください</p>
+        </div>
+      </div>
+
+      <!-- ── 認識結果タブ ── -->
+      <div class="tab-content" id="tab-results">
+        <div id="recog-status" class="recog-status-msg">
+          テンプレートを読み込んでから認識モードを開始してください
+        </div>
+        <div id="result-list" class="result-list"></div>
+
+        <!-- フィードバック -->
+        <div id="feedback-section" class="feedback-section hidden">
+          <p class="feedback-title">認識が違う場合：</p>
+          <div class="feedback-row">
+            <select id="feedback-select" class="feedback-select"></select>
+            <button id="btn-feedback-ok" class="btn btn-sm btn-primary">追加して保存</button>
+          </div>
+        </div>
       </div>
     </aside>
   </main>
@@ -67,6 +102,8 @@
     <div class="btn-row">
       <button id="btn-camera" class="btn btn-primary">カメラ起動</button>
       <button id="btn-record" class="btn btn-record" disabled>録画開始</button>
+      <span class="btn-divider"></span>
+      <button id="btn-recog" class="btn btn-recog-mode" disabled>認識モード</button>
     </div>
   </footer>
 
