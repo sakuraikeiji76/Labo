@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lip Tracker - リップリーディング用ランドマーク追跡</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Lip Tracker</h1>
+    <span id="status-badge" class="badge badge-idle">待機中</span>
+  </header>
+
+  <main>
+    <!-- 左：カメラ映像 -->
+    <section class="camera-panel">
+      <div class="video-wrapper">
+        <video id="video" playsinline autoplay muted></video>
+        <canvas id="canvas"></canvas>
+        <div id="fps-overlay" class="fps-overlay">0 FPS</div>
+      </div>
+    </section>
+
+    <!-- 右：口形ビューワー＋計測値 -->
+    <aside class="info-panel">
+      <div class="mouth-viewer-wrapper">
+        <h2>口の形ビューワー</h2>
+        <canvas id="mouth-canvas" width="260" height="200"></canvas>
+      </div>
+
+      <div class="metrics">
+        <h2>計測値</h2>
+        <table>
+          <tr>
+            <th>開口度</th>
+            <td id="m-openness">—</td>
+          </tr>
+          <tr>
+            <th>口幅</th>
+            <td id="m-width">—</td>
+          </tr>
+          <tr>
+            <th>縦横比</th>
+            <td id="m-ratio">—</td>
+          </tr>
+          <tr>
+            <th>FPS</th>
+            <td id="m-fps">—</td>
+          </tr>
+        </table>
+      </div>
+    </aside>
+  </main>
+
+  <!-- 下：コントロール -->
+  <footer class="controls">
+    <div class="label-row">
+      <label for="phrase-label">フレーズラベル</label>
+      <input
+        id="phrase-label"
+        type="text"
+        placeholder="例：いたい、みずがのみたい"
+        maxlength="100"
+      />
+    </div>
+    <div class="btn-row">
+      <button id="btn-camera" class="btn btn-primary">カメラ起動</button>
+      <button id="btn-record" class="btn btn-record" disabled>録画開始</button>
+    </div>
+  </footer>
+
+  <!-- MediaPipe FaceMesh CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+  <script src="main.js" type="module"></script>
+</body>
+</html>
