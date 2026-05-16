@@ -233,19 +233,32 @@ function onResults(results) {
 
 // ── Camera & FaceMesh setup ───────────────────────────────────────────────────
 async function startCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    alert('このブラウザはカメラAPIに対応していません。Chrome/Firefox/Safari の最新版をお使いください。');
+    return;
+  }
+  if (typeof FaceMesh === 'undefined') {
+    alert('MediaPipe の読み込みに失敗しました。インターネット接続を確認して再読み込みしてください。');
+    return;
+  }
+
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
       audio: false
     });
     video.srcObject = stream;
-    await video.play();
 
-    // Size canvas to match video
-    video.addEventListener('loadedmetadata', () => {
-      canvas.width  = video.videoWidth;
-      canvas.height = video.videoHeight;
-    }, { once: true });
+    // メタデータ確定を待ってからキャンバスサイズを決定
+    await new Promise((resolve, reject) => {
+      video.addEventListener('loadedmetadata', resolve, { once: true });
+      video.addEventListener('error', reject, { once: true });
+    });
+
+    canvas.width  = video.videoWidth  || 640;
+    canvas.height = video.videoHeight || 480;
+
+    await video.play();
 
     initFaceMesh();
     cameraRunning = true;
@@ -255,7 +268,12 @@ async function startCamera() {
     btnRecord.disabled = false;
     setStatus('running');
   } catch (e) {
-    alert(`カメラの起動に失敗しました: ${e.message}`);
+    const msg = e.name === 'NotAllowedError'
+      ? 'カメラのアクセス許可が拒否されました。ブラウザの設定でカメラを許可してください。'
+      : e.name === 'NotFoundError'
+        ? 'カメラが見つかりません。カメラが接続されているか確認してください。'
+        : `カメラの起動に失敗しました: ${e.message}`;
+    alert(msg);
   }
 }
 
@@ -300,11 +318,11 @@ function initFaceMesh() {
   (async function sendFrames() {
     if (!faceMesh) return;
     if (!video.paused && video.readyState >= 2) {
-      if (canvas.width === 0) {
-        canvas.width  = video.videoWidth  || 640;
-        canvas.height = video.videoHeight || 480;
+      try {
+        await faceMesh.send({ image: video });
+      } catch (e) {
+        console.warn('FaceMesh send error:', e);
       }
-      await faceMesh.send({ image: video });
     }
     requestAnimationFrame(sendFrames);
   })();
