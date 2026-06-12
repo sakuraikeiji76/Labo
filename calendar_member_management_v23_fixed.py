@@ -504,6 +504,7 @@ class CalendarApp:
         self.ai_latest_proposal: Optional[Dict] = None
         self.ai_preview_active: bool = False
         self.ai_preview_data: Dict = {}
+        self._ai_retry_count: int = 0  # ✨ 提案違反時の自動修正リトライ回数
         
         # APIキー管理（OSの資格情報ストアを優先、非対応環境はメモリのみ）
         self._keyring_service = "CalendarAI_Anthropic"
@@ -1085,6 +1086,20 @@ class CalendarApp:
         self.ai_chat_display.tag_config("system", foreground="#718096", font=("Meiryo UI", 9, "italic"))
         self.ai_chat_display.tag_config("proposal", background="#fef5e7", relief=tk.RAISED, borderwidth=1)
         
+        # --- ✨ 自動作成・改善モードボタン ---
+        mode_frame = tk.Frame(main_container, bg="#f5f7fa")
+        mode_frame.pack(fill=tk.X, pady=(0, 6))
+        tk.Button(mode_frame, text="🪄 自動作成（3段階）",
+                  command=self._start_auto_generate,
+                  bg="#d69e2e", fg="white", font=("Meiryo UI", 9, "bold"),
+                  relief=tk.FLAT, padx=10, pady=4, cursor="hand2"
+                  ).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(mode_frame, text="📈 改善提案（現状を分析）",
+                  command=self._start_improvement,
+                  bg="#38a169", fg="white", font=("Meiryo UI", 9, "bold"),
+                  relief=tk.FLAT, padx=10, pady=4, cursor="hand2"
+                  ).pack(side=tk.LEFT, padx=4)
+
         # --- 例文ボタン ---
         examples_frame = tk.Frame(main_container, bg="#f5f7fa")
         examples_frame.pack(fill=tk.X, pady=(0, 6))
@@ -1253,7 +1268,10 @@ class CalendarApp:
         
         # ユーザーメッセージを表示
         self._add_chat_message("user", user_message)
-        
+
+        # ✨ 新しい依頼なので自動修正リトライ回数をリセット
+        self._ai_retry_count = 0
+
         # 送信ボタンを無効化してローディング表示
         try:
             self.ai_send_btn.config(state=tk.DISABLED)
@@ -1265,39 +1283,47 @@ class CalendarApp:
         # 別スレッドでAPI呼び出し
         threading.Thread(target=self._call_claude_api, args=(user_message,), daemon=True).start()
 
-    def _call_claude_api(self, user_message):
-        """Claude APIを呼び出し（別スレッドで実行）"""
-        try:
-            # 現在のカレンダー状態を取得
-            calendar_state = self._get_calendar_state()
-            
-            # ✨ メンバー情報をフォーマット
-            members_info = self._format_members_for_ai()
-            team_rules_text = calendar_state['team_rules'] if calendar_state['team_rules'] else "特になし"
-            
-            # システムプロンプト
-            system_prompt = f"""あなたは医療機関の勤務表作成支援AIです。
+    def _build_system_prompt(self, extra_instruction: str = "") -> str:
+        """カレンダー状態・メンバー情報・勤務分析を統合したシステムプロンプトを構築"""
+        calendar_state = self._get_calendar_state()
+        members_info = self._format_members_for_ai()
+        team_rules_text = calendar_state['team_rules'] if calendar_state['team_rules'] else "特になし"
+        analysis = self._analyze_schedule()
+        analysis_text = self._format_analysis_text(analysis)
+        max_col = self.BLOCK_W - 1
 
-【全体の決まり事】
+        prompt = f"""あなたは医療機関の勤務表作成支援AIです。
+
+【絶対に守るべきルール（ハードルール）】
+1. ロックされたセルは絶対に変更しない
+2. 同じ人を同じ日に複数の勤務に割り当てない（当直と同日の明けは除く）
+3. 「当直」に入った人は、翌日は必ず「明け」にする（他の勤務は不可）
+4. 「明け」は前日に「当直」だった人だけに割り当てる
+5. personはアクティブメンバーの表示名から選ぶ
+6. 勤務回数は全員でできるだけ均等にする（下記の集計を必ず参照）
+
+【全体の決まり事（チームルール）】
 {team_rules_text}
 
-【アクティブメンバー情報】
+【アクティブメンバー情報（個人リクエストは必ず尊重すること）】
 {members_info}
+
+【現在の勤務状況の分析（Pythonで機械集計した正確な値）】
+{analysis_text}
 
 現在の状況:
 - 年月: {self.current_year}年{self.current_month}月
 - 月の日数: {calendar.monthrange(self.current_year, self.current_month)[1]}日
-- 登録されている人員: {', '.join(calendar_state['people'])}
-- 勤務種別: ER（4列）, A（4列）, B（4列）, 当直（4列）, 明け（4列）, 外勤（4列）, 出張（4列）, 休み（4列）
+- 勤務種別と列数: ER, A, B, 当直, 明け, 外勤, 出張, 休み（各{self.BLOCK_W}列、col=0〜{max_col}）
 
 現在の勤務表データ:
-{json.dumps(calendar_state['current_assignments'], ensure_ascii=False, indent=2)}
+{json.dumps(calendar_state['current_assignments'], ensure_ascii=False)}
 
 ロックされているセル（変更不可）:
 {json.dumps(calendar_state['locked_cells'], ensure_ascii=False)}
 
 ユーザーの要望に基づいて勤務表の提案を行ってください。
-全体の決まり事とメンバーの個人リクエストを考慮してください。
+偏りの是正には上記の分析データ（勤務回数集計・偏り指標）を必ず根拠として使ってください。
 
 **重要**: 提案する場合は、必ず以下のJSON形式で出力してください:
 - ```jsonブロックは不要です
@@ -1314,58 +1340,65 @@ class CalendarApp:
 }}
 
 注意事項:
-- ロックされたセルは絶対に変更しない
-- 各勤務種別（ER, A, B等）は0-3の列（col）がある
+- 各勤務種別の列（col）は0〜{max_col}
 - 日付（day）は1から月末日まで
-- personはアクティブメンバーのdisplay_nameから選ぶ
 - 提案がない場合はassignmentsを空配列にする
 - **全日程を提案する場合は、回答が切れないよう注意してJSONを完結させてください**"""
+        if extra_instruction:
+            prompt += f"\n\n【今回の追加指示】\n{extra_instruction}"
+        return prompt
+
+    def _api_request(self, system_prompt: str, messages: List[Dict]) -> str:
+        """Claude APIを呼び出してテキスト応答を返す（呼び出し元スレッドでブロック）"""
+        import urllib.request
+
+        data = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 16000,
+            "system": system_prompt,
+            "messages": messages
+        }
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=json.dumps(data).encode('utf-8'),
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01"
+            }
+        )
+        with urllib.request.urlopen(req) as response:
+            result = json.loads(response.read().decode('utf-8'))
+
+        assistant_message = ""
+        for content_block in result.get("content", []):
+            if content_block.get("type") == "text":
+                assistant_message += content_block.get("text", "")
+        return assistant_message
+
+    def _call_claude_api(self, user_message):
+        """Claude APIを呼び出し（別スレッドで実行）"""
+        import urllib.error
+        try:
+            system_prompt = self._build_system_prompt()
 
             # 会話履歴に追加
             self.ai_conversation_history.append({
                 "role": "user",
                 "content": user_message
             })
-            
-            # API呼び出し
-            import urllib.request
-            import urllib.error
-            
-            data = {
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 16000,
-                "system": system_prompt,
-                "messages": self.ai_conversation_history
-            }
-            
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages",
-                data=json.dumps(data).encode('utf-8'),
-                headers={
-                    "Content-Type": "application/json",
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01"
-                }
-            )
-            
-            with urllib.request.urlopen(req) as response:
-                result = json.loads(response.read().decode('utf-8'))
-            
-            # レスポンスを取得
-            assistant_message = ""
-            for content_block in result.get("content", []):
-                if content_block.get("type") == "text":
-                    assistant_message += content_block.get("text", "")
-            
+
+            assistant_message = self._api_request(system_prompt, self.ai_conversation_history)
+
             # 会話履歴に追加
             self.ai_conversation_history.append({
                 "role": "assistant",
                 "content": assistant_message
             })
-            
+
             # メインスレッドでUI更新
             self.root.after(0, self._handle_ai_response, assistant_message)
-            
+
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 error_msg = "❌ APIキーが無効です。「🔑 APIキー」ボタンから正しいキーを設定してください。"
@@ -1401,18 +1434,42 @@ class CalendarApp:
         if proposal and proposal.get("assignments"):
             # 提案がある場合
             explanation = proposal.get("explanation", "")
-            
+
             # 応答が途中で切れていた可能性をチェック
             if len(response_text) > 15000 or response_text.endswith("...") or not response_text.rstrip().endswith("}"):
                 warning_msg = "\n\n⚠️ 注意: AIの応答が非常に長いため、一部のデータが省略されている可能性があります。"
                 self._add_chat_message("assistant", explanation + warning_msg)
             else:
                 self._add_chat_message("assistant", explanation)
-            
+
+            # ✨ 提案をPython側で検証し、違反があれば自動で修正を依頼（1回まで）
+            violations = self._validate_proposal(proposal)
+            if violations and getattr(self, "_ai_retry_count", 0) < 1:
+                self._ai_retry_count = getattr(self, "_ai_retry_count", 0) + 1
+                self._add_chat_message("system",
+                    f"⚠️ 提案に{len(violations)}件のルール違反を検出。自動修正を依頼しています...\n"
+                    + "\n".join(f"  ・{v}" for v in violations[:8]))
+                fix_request = ("先ほどの提案に以下のルール違反があります。"
+                               "違反を解消した提案を同じJSON形式で再出力してください:\n- "
+                               + "\n- ".join(violations[:20]))
+                try:
+                    self.ai_send_btn.config(state=tk.DISABLED)
+                    self.ai_loading_label.config(text="🔄 違反を自動修正中...")
+                    self.ai_loading_label.pack(pady=10)
+                except tk.TclError:
+                    pass
+                threading.Thread(target=self._call_claude_api, args=(fix_request,), daemon=True).start()
+                return
+
             # 提案詳細を表示
             assignment_summary = f"📋 {len(proposal['assignments'])}件の割り当てを提案します"
+            if violations:
+                assignment_summary += (f"\n⚠️ {len(violations)}件の問題が残っています:\n"
+                                       + "\n".join(f"  ・{v}" for v in violations[:8]))
+            else:
+                assignment_summary += "\n✅ ルール検証: 問題なし"
             self._add_chat_message("proposal", assignment_summary)
-            
+
             # 提案を保存
             self.ai_latest_proposal = proposal
             self._show_action_buttons()
@@ -1535,7 +1592,7 @@ class CalendarApp:
         # 現在の割り当てを取得
         assignments = []
         for (day, label_idx, col), person in self.cell_data.items():
-            if person and person.strip() and 1 <= label_idx <= 7:
+            if person and person.strip() and 1 <= label_idx <= 8:
                 label = self.LABELS[label_idx]
                 assignments.append({
                     "day": day,
@@ -1547,7 +1604,7 @@ class CalendarApp:
         # ロックされたセル
         locked = []
         for (day, label_idx, col) in self.locked_cells:
-            if 1 <= label_idx <= 7:
+            if 1 <= label_idx <= 8:
                 label = self.LABELS[label_idx]
                 person = self.cell_data.get((day, label_idx, col), "")
                 locked.append({
@@ -1575,6 +1632,292 @@ class CalendarApp:
             "team_rules": self.team_rules,  # ✨ 全体の決まり事
             "active_members": active_members  # ✨ アクティブメンバー情報
         }
+
+    # ───── ✨ 勤務表分析エンジン（C案: Python側で機械集計） ─────
+
+    WORK_LABELS = ("ER", "A", "B", "当直", "明け", "外勤", "出張", "休み")
+    DUTY_LABELS = ("ER", "A", "B", "当直", "外勤")  # 負荷としてカウントする実勤務
+
+    def _collect_day_label_map(self, extra_assignments: Optional[List[Dict]] = None):
+        """cell_data（＋追加提案）から {person: {day: set(labels)}} を作る"""
+        person_days: Dict[str, Dict[int, set]] = defaultdict(lambda: defaultdict(set))
+        for (day, label_idx, col), person in self.cell_data.items():
+            if person and person.strip() and 1 <= label_idx <= 8:
+                person_days[person][day].add(self.LABELS[label_idx])
+        if extra_assignments:
+            for a in extra_assignments:
+                if a.get("person"):
+                    person_days[a["person"]][a["day"]].add(a["label"])
+        return person_days
+
+    def _analyze_schedule(self) -> Dict:
+        """現在の勤務表を機械集計して偏り・違反を抽出"""
+        last_day = calendar.monthrange(self.current_year, self.current_month)[1]
+        active_names = [m["display_name"] for m in self.members_data if m.get("active", True)]
+
+        counts: Dict[str, Counter] = {name: Counter() for name in active_names}
+        weekend_counts: Counter = Counter()
+        person_days = self._collect_day_label_map()
+
+        for person, days in person_days.items():
+            if person not in counts:
+                counts[person] = Counter()
+            for day, labels in days.items():
+                for label in labels:
+                    counts[person][label] += 1
+                if any(l in self.DUTY_LABELS for l in labels):
+                    try:
+                        if date(self.current_year, self.current_month, day).weekday() >= 5:
+                            weekend_counts[person] += 1
+                    except ValueError:
+                        pass
+
+        # 連続勤務日数の最大値
+        max_streaks: Dict[str, int] = {}
+        for person, days in person_days.items():
+            streak = best = 0
+            for d in range(1, last_day + 1):
+                if any(l in self.DUTY_LABELS for l in days.get(d, ())):
+                    streak += 1
+                    best = max(best, streak)
+                else:
+                    streak = 0
+            max_streaks[person] = best
+
+        violations = self._find_rule_violations(person_days, last_day, active_names)
+
+        return {
+            "counts": counts,
+            "weekend_counts": weekend_counts,
+            "max_streaks": max_streaks,
+            "violations": violations,
+            "last_day": last_day,
+        }
+
+    def _find_rule_violations(self, person_days, last_day, active_names) -> List[str]:
+        """ハードルール違反を列挙"""
+        violations = []
+        for person, days in sorted(person_days.items()):
+            for day in sorted(days):
+                labels = days[day]
+                # 同日複数勤務（当直+明け以外）
+                dup = [l for l in labels if l in self.WORK_LABELS]
+                if len(dup) > 1 and set(dup) != {"当直", "明け"}:
+                    violations.append(f"{day}日: {person} が同日に複数勤務（{'/'.join(sorted(dup))}）")
+                # 当直翌日は明け
+                if "当直" in labels and day < last_day:
+                    next_labels = days.get(day + 1, set())
+                    others = [l for l in next_labels if l in self.DUTY_LABELS]
+                    if others:
+                        violations.append(f"{day}日: {person} が当直なのに翌{day+1}日に勤務（{'/'.join(others)}）が入っている")
+                # 明けの前日は当直
+                if "明け" in labels and day > 1:
+                    if "当直" not in days.get(day - 1, set()):
+                        violations.append(f"{day}日: {person} が明けだが前日{day-1}日に当直がない")
+            if person not in active_names:
+                violations.append(f"{person} はアクティブメンバーに存在しない")
+        return violations
+
+    def _format_analysis_text(self, analysis: Dict) -> str:
+        """分析結果をAIプロンプト用テキストに整形"""
+        lines = ["■ メンバー別勤務回数（種別ごと）:"]
+        all_totals = []
+        for person in sorted(analysis["counts"]):
+            c = analysis["counts"][person]
+            total = sum(c[l] for l in self.DUTY_LABELS)
+            all_totals.append((person, total))
+            detail = ", ".join(f"{l}:{c[l]}" for l in self.WORK_LABELS if c[l])
+            wk = analysis["weekend_counts"].get(person, 0)
+            streak = analysis["max_streaks"].get(person, 0)
+            lines.append(f"  {person}: 実勤務計{total}回 [{detail or 'なし'}] 土日勤務{wk}回 最大連続{streak}日")
+
+        if all_totals:
+            totals = [t for _, t in all_totals]
+            mx, mn = max(totals), min(totals)
+            lines.append(f"■ 偏り指標: 実勤務回数 最多{mx}回/最少{mn}回（差{mx-mn}回）")
+            if mx - mn >= 2:
+                most = [p for p, t in all_totals if t == mx]
+                least = [p for p, t in all_totals if t == mn]
+                lines.append(f"  → 多い: {', '.join(most)} / 少ない: {', '.join(least)} — この差を縮める割り当てを優先すること")
+
+        if analysis["violations"]:
+            lines.append("■ 現在のルール違反（修正が必要）:")
+            for v in analysis["violations"][:20]:
+                lines.append(f"  ⚠ {v}")
+        else:
+            lines.append("■ 現在ルール違反はありません")
+        return "\n".join(lines)
+
+    def _validate_proposal(self, proposal: Dict) -> List[str]:
+        """AI提案を現在の勤務表にマージした場合のハードルール違反を検出"""
+        problems = []
+        last_day = calendar.monthrange(self.current_year, self.current_month)[1]
+        active_names = {m["display_name"] for m in self.members_data if m.get("active", True)}
+        max_col = self.BLOCK_W - 1
+
+        assignments = proposal.get("assignments", [])
+        valid_assignments = []
+        for a in assignments:
+            day, label, col, person = a.get("day"), a.get("label"), a.get("col"), a.get("person")
+            if not isinstance(day, int) or not (1 <= day <= last_day):
+                problems.append(f"無効な日付: {a}")
+                continue
+            if label not in self.WORK_LABELS:
+                problems.append(f"無効な勤務種別: {a}")
+                continue
+            if not isinstance(col, int) or not (0 <= col <= max_col):
+                problems.append(f"列colは0〜{max_col}の範囲にすること: {a}")
+                continue
+            if person not in active_names:
+                problems.append(f"{person} はアクティブメンバーではない（{day}日 {label}）")
+                continue
+            try:
+                label_idx = self.LABELS.index(label)
+                if (day, label_idx, col) in self.locked_cells:
+                    problems.append(f"{day}日 {label} col{col} はロック済みセル（変更不可）")
+                    continue
+            except ValueError:
+                continue
+            valid_assignments.append(a)
+
+        # 提案をマージした状態でルールチェック
+        # （提案に含まれる人の既存セルはクリアされる仕様に合わせる）
+        proposed_people = {a["person"] for a in valid_assignments}
+        person_days: Dict[str, Dict[int, set]] = defaultdict(lambda: defaultdict(set))
+        for (day, label_idx, col), person in self.cell_data.items():
+            if not person or not person.strip() or not (1 <= label_idx <= 8):
+                continue
+            if person in proposed_people and (day, label_idx, col) not in self.locked_cells:
+                continue  # 上書きされるセル
+            person_days[person][day].add(self.LABELS[label_idx])
+        for a in valid_assignments:
+            person_days[a["person"]][a["day"]].add(a["label"])
+
+        problems.extend(self._find_rule_violations(person_days, last_day, sorted(active_names)))
+        return problems
+
+    # ───── ✨ 段階的自動作成（B案）＆改善モード ─────
+
+    AUTO_GEN_STAGES = [
+        ("当直・明け", "今回は「当直」と「明け」だけを月全体に割り当ててください。"
+         "当直の翌日は必ず同じ人を明けにすること。当直回数は全員で均等にし、"
+         "土日の当直も特定の人に偏らないようにすること。他の勤務種別は提案しないこと。"),
+        ("ER・A・B", "当直・明けは確定済みです（変更しないこと）。今回は「ER」「A」「B」だけを"
+         "月全体に割り当ててください。当直・明けの日と重複させないこと。"
+         "各人の勤務回数が均等になるようにすること。他の勤務種別は提案しないこと。"),
+        ("外勤・出張・休み", "当直・明け・ER・A・Bは確定済みです（変更しないこと）。"
+         "今回は「外勤」「出張」「休み」を割り当ててください。"
+         "個人リクエストの休み希望を最優先で反映し、休み日数も均等にすること。"),
+    ]
+
+    def _start_auto_generate(self):
+        """段階的自動作成を開始（当直→ER/A/B→外勤・休みの3段階）"""
+        if not self.api_key:
+            ok = self._prompt_api_key()
+            if not ok or not self.api_key:
+                return
+        if not messagebox.askyesno("確認",
+                "勤務表を3段階（当直・明け → ER/A/B → 外勤・出張・休み）で自動作成します。\n"
+                "API呼び出しが3回行われます。よろしいですか？",
+                parent=self.ai_window or self.root):
+            return
+        self._add_chat_message("system", "🪄 段階的自動作成を開始します（3段階）...")
+        try:
+            self.ai_send_btn.config(state=tk.DISABLED)
+            self.ai_loading_label.config(text="🔄 段階1/3: 当直・明けを作成中...")
+            self.ai_loading_label.pack(pady=10)
+        except tk.TclError:
+            pass
+        threading.Thread(target=self._run_auto_generate, daemon=True).start()
+
+    def _run_auto_generate(self):
+        """3段階のAI呼び出しで勤務表全体を生成（別スレッド）"""
+        import urllib.error
+        combined: List[Dict] = []
+        try:
+            for i, (stage_name, stage_inst) in enumerate(self.AUTO_GEN_STAGES, 1):
+                self.root.after(0, self._set_loading_text,
+                                f"🔄 段階{i}/3: {stage_name}を作成中...")
+                # ここまでの確定分をプロンプトに含める
+                extra = stage_inst
+                if combined:
+                    extra += ("\n\n【ここまでの段階で確定した割り当て（変更禁止・重複禁止）】\n"
+                              + json.dumps(combined, ensure_ascii=False))
+                system_prompt = self._build_system_prompt(extra_instruction=extra)
+                response = self._api_request(system_prompt, [
+                    {"role": "user", "content": f"{stage_name}の割り当てをJSON形式で提案してください。"}
+                ])
+                proposal = self._extract_json_from_response(response)
+                if not proposal or not proposal.get("assignments"):
+                    self.root.after(0, self._handle_ai_error,
+                                    f"段階{i}（{stage_name}）で有効な提案を取得できませんでした。")
+                    return
+                combined.extend(proposal["assignments"])
+                self.root.after(0, self._add_chat_message, "system",
+                                f"✅ 段階{i}/3 完了: {stage_name} {len(proposal['assignments'])}件")
+
+            final = {"explanation": "3段階の自動作成による勤務表提案です。", "assignments": combined}
+            self.root.after(0, self._finish_auto_generate, final)
+        except urllib.error.HTTPError as e:
+            self.root.after(0, self._handle_ai_error, f"APIエラー（{e.code}）: {str(e)}")
+        except Exception as e:
+            self.root.after(0, self._handle_ai_error, f"通信エラー: {str(e)}")
+
+    def _set_loading_text(self, text):
+        try:
+            if self.ai_loading_label.winfo_exists():
+                self.ai_loading_label.config(text=text)
+        except tk.TclError:
+            pass
+
+    def _finish_auto_generate(self, proposal):
+        """自動作成完了: 検証して提案として提示（メインスレッド）"""
+        try:
+            self.ai_loading_label.pack_forget()
+            self.ai_send_btn.config(state=tk.NORMAL)
+        except tk.TclError:
+            pass
+        violations = self._validate_proposal(proposal)
+        self.ai_latest_proposal = proposal
+        msg = f"📋 自動作成完了: {len(proposal['assignments'])}件の割り当てを提案します"
+        if violations:
+            msg += f"\n⚠️ 検証で{len(violations)}件の問題を検出:\n" + "\n".join(f"  ・{v}" for v in violations[:10])
+            msg += "\nプレビューで確認のうえ、必要に応じて「この違反を修正して」と依頼してください。"
+        else:
+            msg += "\n✅ ルール検証: 問題なし"
+        self._add_chat_message("proposal", msg)
+        self._show_action_buttons()
+
+    def _start_improvement(self):
+        """改善モード: 現在の勤務表を分析し、AIに改善案を依頼"""
+        if not self.cell_data:
+            self._add_chat_message("system", "⚠️ 勤務表が空です。まず勤務表をある程度作成してください。")
+            return
+        if not self.api_key:
+            ok = self._prompt_api_key()
+            if not ok or not self.api_key:
+                return
+        analysis = self._analyze_schedule()
+        analysis_text = self._format_analysis_text(analysis)
+        self._add_chat_message("system", "📈 現在の勤務表を分析しました:\n" + analysis_text)
+        request = (
+            "現在の勤務表を分析した結果が上記システム情報にあります。"
+            "次の優先順位で改善案を提案してください:\n"
+            "1. ルール違反の修正（最優先）\n"
+            "2. 勤務回数の偏りの是正（多い人から少ない人へ振り替え）\n"
+            "3. 土日勤務・連続勤務の偏り是正\n"
+            "4. 個人リクエストの反映漏れの修正\n"
+            "変更は必要最小限にし、既に問題ない割り当ては動かさないでください。"
+        )
+        self._add_chat_message("user", "（改善モード）勤務表の改善案を提案して")
+        try:
+            self.ai_send_btn.config(state=tk.DISABLED)
+            self.ai_loading_label.config(text="🔄 Claudeが改善案を検討しています...")
+            self.ai_loading_label.pack(pady=10)
+        except tk.TclError:
+            pass
+        self._ai_retry_count = 0
+        threading.Thread(target=self._call_claude_api, args=(request,), daemon=True).start()
 
     def _show_action_buttons(self):
         """プレビュー/適用ボタンを表示"""
