@@ -469,7 +469,11 @@ class CalendarApp:
         self._day_positions: Dict[int, Tuple[int, int, int, int]] = {}
 
         self.sound_manager = SoundManager()
-        
+
+        # ✨ 自動保存（作業内容を随時ホームディレクトリに退避）
+        self._autosave_path = os.path.join(os.path.expanduser("~"), ".calendar_app_autosave.json")
+        self._autosave_after_id: Optional[str] = None
+
         # ✨ メンバー管理機能の変数
         self.team_rules = ""  # 全体の決まり事
         self.members_data = []  # メンバーリスト
@@ -515,6 +519,7 @@ class CalendarApp:
         self.setup_ui()
         self.root.update_idletasks()
         self.root.after(100, self.create_calendar)
+        self.root.after(400, self._check_autosave_restore)
         
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -618,6 +623,10 @@ class CalendarApp:
             tk.Button(row3, text="🎯 訓練",
                       command=lambda: self._open_special_item_window("訓練"),
                       bg="#5b8dd9", fg="white", cursor="hand2", **special_btn_kw).pack(side=tk.LEFT, padx=3)
+            tk.Button(row3, text="✅ ルールチェック",
+                      command=self._show_rule_check,
+                      bg="#38a169", fg="white", cursor="hand2",
+                      font=("Meiryo UI", 10, "bold"), width=14, height=1).pack(side=tk.LEFT, padx=12)
 
         else:
             # ========== 大画面レイアウト: 2行構成 ==========
@@ -673,6 +682,18 @@ class CalendarApp:
                 tk.Button(row2, text=label,
                           command=lambda c=cat: self._open_special_item_window(c),
                           bg="#5b8dd9", fg="white", cursor="hand2", **special_btn_kw).pack(side=tk.LEFT, padx=3)
+            tk.Button(row2, text="✅ ルールチェック",
+                      command=self._show_rule_check,
+                      bg="#38a169", fg="white", cursor="hand2",
+                      font=("Meiryo UI", 10, "bold"), width=14, height=1).pack(side=tk.LEFT, padx=12)
+
+        # ✨ ステータスバー（操作結果・自動保存状況を常時表示）
+        self.status_var = tk.StringVar(
+            value="準備完了 | ダブルクリック:入力 / 右クリック:メニュー / ドラッグ:移動 / Ctrl+S:保存 / Ctrl+Z:戻る")
+        tk.Label(self.root, textvariable=self.status_var, anchor="w",
+                 bg="#e8e8e8", fg="#333", font=("Meiryo UI", 9),
+                 bd=1, relief=tk.SUNKEN, padx=8
+                 ).pack(side=tk.BOTTOM, fill=tk.X)
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -723,6 +744,9 @@ class CalendarApp:
         
         self.root.bind("<Control-z>", lambda e: self.undo())
         self.root.bind("<Control-y>", lambda e: self.redo())
+        # ✨ ファイル操作ショートカット
+        self.root.bind("<Control-s>", lambda e: self.save_data())
+        self.root.bind("<Control-o>", lambda e: self.load_data())
 
         self.right_frame = tk.Frame(self.paned, bg="#f9f9f9", width=400)
         self.paned.add(self.right_frame, minsize=350, stretch="never")
@@ -1105,7 +1129,7 @@ class CalendarApp:
         examples_frame.pack(fill=tk.X, pady=(0, 6))
         tk.Label(examples_frame, text="💡 例:", bg="#f5f7fa",
                  font=("Meiryo UI", 9)).pack(side=tk.LEFT, padx=(0, 4))
-        for ex in ["休みを均等に配分して", "桜と小の当直を被らないように", "金のER勤務を増やして"]:
+        for ex in ["空いているマスを埋めて", "当直を均等にして", "土日勤務の偏りをなくして", "休みを均等に配分して"]:
             tk.Button(examples_frame, text=ex,
                       command=lambda e=ex: self._insert_example(e),
                       bg="#e2e8f0", fg="#2d3748", font=("Meiryo UI", 8),
@@ -2102,6 +2126,8 @@ class CalendarApp:
             self._redraw_all_cells()
         
         self._add_chat_message("system", "✅ 提案を適用しました！")
+        self._set_status("✅ AI提案を適用しました（Ctrl+Zで取り消し可能）")
+        self._schedule_autosave()
         self._hide_action_buttons()
         self.ai_latest_proposal = None
         
@@ -2292,9 +2318,94 @@ class CalendarApp:
             self.sound_manager.play("bright")
 
     def _on_close(self):
+        self._do_autosave()  # 終了時に必ず自動保存
         self._close_ai_window()
         self.sound_manager.cleanup()
         self.root.destroy()
+
+    # ───── ✨ ステータスバー・自動保存・ルールチェック ─────
+
+    def _set_status(self, text: str):
+        """ステータスバーにメッセージを表示"""
+        if hasattr(self, "status_var"):
+            self.status_var.set(text)
+
+    def _schedule_autosave(self):
+        """自動保存を予約（3秒間操作がなければ実行、連続編集中は延期）"""
+        if self._autosave_after_id is not None:
+            try:
+                self.root.after_cancel(self._autosave_after_id)
+            except Exception:
+                pass
+        self._autosave_after_id = self.root.after(3000, self._do_autosave)
+
+    def _do_autosave(self):
+        """作業内容をホームディレクトリに自動保存"""
+        self._autosave_after_id = None
+        try:
+            with open(self._autosave_path, "w", encoding="utf-8") as f:
+                json.dump(self._serialize_data(), f, ensure_ascii=False)
+            self._set_status(f"💾 自動保存しました（{datetime.now().strftime('%H:%M:%S')}） → {self._autosave_path}")
+        except Exception as e:
+            self._set_status(f"⚠️ 自動保存に失敗: {e}")
+
+    def _check_autosave_restore(self):
+        """起動時に自動保存データがあれば復元を提案"""
+        if not os.path.exists(self._autosave_path):
+            return
+        try:
+            with open(self._autosave_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not data.get("cell_data") and not data.get("members_data"):
+                return
+            yr, mo = data.get("year"), data.get("month")
+            n = len(data.get("cell_data", {}))
+            if messagebox.askyesno("前回データの復元",
+                    f"前回の自動保存データが見つかりました。\n"
+                    f"（{yr}年{mo}月 / 入力セル数: {n}）\n\n復元しますか？"):
+                self._apply_loaded_data(data)
+                self._set_status(f"📂 前回の自動保存データ（{yr}年{mo}月）を復元しました")
+        except Exception as e:
+            self._set_status(f"⚠️ 自動保存データの復元に失敗: {e}")
+
+    def _show_rule_check(self):
+        """勤務表をローカルで検証して結果を表示（API不要・無料）"""
+        analysis = self._analyze_schedule()
+        text = self._format_analysis_text(analysis)
+        n_violation = len(analysis["violations"])
+
+        win = tk.Toplevel(self.root)
+        win.title("✅ ルールチェック結果")
+        win.geometry("640x520")
+        win.transient(self.root)
+
+        header_bg = "#e53e3e" if n_violation else "#38a169"
+        header_text = (f"⚠️ {n_violation}件のルール違反があります" if n_violation
+                       else "✅ ルール違反はありません")
+        tk.Label(win, text=header_text, bg=header_bg, fg="white",
+                 font=("Meiryo UI", 13, "bold"), pady=8).pack(fill=tk.X)
+
+        st = scrolledtext.ScrolledText(win, wrap=tk.WORD, font=("Meiryo UI", 10),
+                                       padx=12, pady=10)
+        st.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        st.insert("1.0", text)
+        st.config(state=tk.DISABLED)
+
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(pady=(0, 10))
+        if n_violation:
+            def fix_with_ai():
+                win.destroy()
+                self._open_ai_window()
+                self._start_improvement()
+            tk.Button(btn_frame, text="🤖 AIに修正を依頼", command=fix_with_ai,
+                      bg="#805ad5", fg="white", font=("Meiryo UI", 10, "bold"),
+                      relief=tk.FLAT, padx=15, pady=6, cursor="hand2").pack(side=tk.LEFT, padx=8)
+        tk.Button(btn_frame, text="閉じる", command=win.destroy,
+                  bg="#a0aec0", fg="white", font=("Meiryo UI", 10),
+                  relief=tk.FLAT, padx=15, pady=6, cursor="hand2").pack(side=tk.LEFT, padx=8)
+
+        self._set_status(header_text)
 
     def _mark_day_as_complete(self, day: int):
         """指定した日を完成状態にマークする"""
@@ -4535,11 +4646,12 @@ class CalendarApp:
             'completed_days': copy.deepcopy(self.completed_days),
         }
         self.undo_stack.append(state)
-        
+
         if len(self.undo_stack) > self.max_history:
             self.undo_stack.pop(0)
-        
+
         self.redo_stack.clear()
+        self._schedule_autosave()  # ✨ 編集のたびに自動保存を予約
     
     def undo(self):
         if not self.undo_stack:
@@ -4673,14 +4785,9 @@ class CalendarApp:
             self.create_calendar()
             self.draw_statistics()
 
-    def save_data(self):
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            initialfile=f"calendar_{self.current_year}_{self.current_month}.json"
-        )
-        if not filename: return
-        data = {
+    def _serialize_data(self) -> Dict:
+        """現在の全データをJSON保存用のdictに変換"""
+        return {
             "year": self.current_year,
             "month": self.current_month,
             "cell_data": {f"{d},{i},{j}": v for (d, i, j), v in self.cell_data.items()},
@@ -4702,8 +4809,17 @@ class CalendarApp:
             # ✨ サブカレンダーデータ
             "sub_cell_data": {f"{name}|||{d}|||{slot}": v for (name, d, slot), v in self.sub_cell_data.items()},
         }
+
+    def save_data(self):
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile=f"calendar_{self.current_year}_{self.current_month}.json"
+        )
+        if not filename: return
         with open(filename, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(self._serialize_data(), f, ensure_ascii=False, indent=2)
+        self._set_status(f"💾 保存しました: {os.path.basename(filename)}")
         messagebox.showinfo("保存完了", f"データを保存しました:\n{filename}")
 
     def load_data(self):
@@ -4711,72 +4827,77 @@ class CalendarApp:
         if not filename: return
         try:
             with open(filename, "r", encoding="utf-8") as f: data = json.load(f)
-            self.current_year = data["year"]
-            self.current_month = data["month"]
-            self.year_var.set(str(self.current_year))
-            self.month_var.set(str(self.current_month))
-            self.cell_data = {tuple(map(int, k.split(","))): v for k, v in data["cell_data"].items()}
-            self.cell_colors = {tuple(map(int, k.split(","))): v for k, v in data["cell_colors"].items()}
-            self.cell_sequence = {tuple(map(int, k.split(","))): v for k, v in data["cell_sequence"].items()}
-            self.er_marks = {tuple(map(int, k.split(","))) for k in data["er_marks"]}
-            self.value_colors = data["value_colors"]
-            self.next_sequence = data["next_sequence"]
-            if "special_borders" in data:
-                self.special_borders = {tuple(map(int, k.split(","))): v for k, v in data["special_borders"].items()}
-            else:
-                self.special_borders = {}
-            if "locked_cells" in data:
-                self.locked_cells = {tuple(map(int, k.split(","))) for k in data["locked_cells"]}
-            else:
-                self.locked_cells = set()
-            if "completed_days" in data:
-                self.completed_days = set(data["completed_days"])
-            else:
-                self.completed_days = set()
-            # ✨ メンバー管理情報を読込
-            if "team_rules" in data:
-                self.team_rules = data["team_rules"]
-            else:
-                self.team_rules = ""
-            if "members_data" in data:
-                self.members_data = data["members_data"]
-            else:
-                self.members_data = []
-                self._load_default_members()
-            if "next_member_id" in data:
-                self._next_member_id = data["next_member_id"]
-            else:
-                self._next_member_id = len(self.members_data) + 1
-            # ✨ 日付メモを読込
-            # ✨ 特別項目マスターデータを読込
-            if "special_items" in data:
-                for cat in ["外勤", "委員会", "コース", "訓練"]:
-                    if cat in data["special_items"]:
-                        self.special_items[cat] = data["special_items"][cat]
-            if "day_memos" in data:
-                self.day_memos = {int(k): v for k, v in data["day_memos"].items()}
-            else:
-                self.day_memos = {}
-            # ✨ サブカレンダーデータを読込
-            if "sub_cell_data" in data:
-                self.sub_cell_data = {}
-                for k, v in data["sub_cell_data"].items():
-                    parts = k.split("|||")
-                    if len(parts) == 3:
-                        name, d, slot = parts[0], int(parts[1]), parts[2]
-                        self.sub_cell_data[(name, d, slot)] = v
-                    elif len(parts) == 2:
-                        # 旧フォーマット互換: (name, day) → duty として移行
-                        name, d = parts[0], int(parts[1])
-                        self.sub_cell_data[(name, d, "duty")] = v
-            else:
-                self.sub_cell_data = {}
-            self.undo_stack.clear()
-            self.redo_stack.clear()
-            self.create_calendar()
-            self.draw_statistics()
+            self._apply_loaded_data(data)
+            self._set_status(f"📂 読み込みました: {os.path.basename(filename)}")
             messagebox.showinfo("読込完了", "データを読み込みました")
         except Exception as e: messagebox.showerror("エラー", f"データの読み込みに失敗しました:\n{e}")
+
+    def _apply_loaded_data(self, data: Dict):
+        """保存データを現在の状態に反映して再描画"""
+        self.current_year = data["year"]
+        self.current_month = data["month"]
+        self.year_var.set(str(self.current_year))
+        self.month_var.set(str(self.current_month))
+        self.cell_data = {tuple(map(int, k.split(","))): v for k, v in data["cell_data"].items()}
+        self.cell_colors = {tuple(map(int, k.split(","))): v for k, v in data["cell_colors"].items()}
+        self.cell_sequence = {tuple(map(int, k.split(","))): v for k, v in data["cell_sequence"].items()}
+        self.er_marks = {tuple(map(int, k.split(","))) for k in data["er_marks"]}
+        self.value_colors = data["value_colors"]
+        self.next_sequence = data["next_sequence"]
+        if "special_borders" in data:
+            self.special_borders = {tuple(map(int, k.split(","))): v for k, v in data["special_borders"].items()}
+        else:
+            self.special_borders = {}
+        if "locked_cells" in data:
+            self.locked_cells = {tuple(map(int, k.split(","))) for k in data["locked_cells"]}
+        else:
+            self.locked_cells = set()
+        if "completed_days" in data:
+            self.completed_days = set(data["completed_days"])
+        else:
+            self.completed_days = set()
+        # ✨ メンバー管理情報を読込
+        if "team_rules" in data:
+            self.team_rules = data["team_rules"]
+        else:
+            self.team_rules = ""
+        if "members_data" in data:
+            self.members_data = data["members_data"]
+        else:
+            self.members_data = []
+            self._load_default_members()
+        if "next_member_id" in data:
+            self._next_member_id = data["next_member_id"]
+        else:
+            self._next_member_id = len(self.members_data) + 1
+        # ✨ 日付メモを読込
+        # ✨ 特別項目マスターデータを読込
+        if "special_items" in data:
+            for cat in ["外勤", "委員会", "コース", "訓練"]:
+                if cat in data["special_items"]:
+                    self.special_items[cat] = data["special_items"][cat]
+        if "day_memos" in data:
+            self.day_memos = {int(k): v for k, v in data["day_memos"].items()}
+        else:
+            self.day_memos = {}
+        # ✨ サブカレンダーデータを読込
+        if "sub_cell_data" in data:
+            self.sub_cell_data = {}
+            for k, v in data["sub_cell_data"].items():
+                parts = k.split("|||")
+                if len(parts) == 3:
+                    name, d, slot = parts[0], int(parts[1]), parts[2]
+                    self.sub_cell_data[(name, d, slot)] = v
+                elif len(parts) == 2:
+                    # 旧フォーマット互換: (name, day) → duty として移行
+                    name, d = parts[0], int(parts[1])
+                    self.sub_cell_data[(name, d, "duty")] = v
+        else:
+            self.sub_cell_data = {}
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.create_calendar()
+        self.draw_statistics()
 
     def export_to_excel(self):
         try:
